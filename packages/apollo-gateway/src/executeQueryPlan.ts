@@ -15,6 +15,8 @@ import {
   TypeNameMetaFieldDef,
   VariableDefinitionNode,
   GraphQLFieldResolver,
+  visit,
+  VariableNode,
 } from 'graphql';
 import { GraphQLDataSource } from './datasources/types';
 import {
@@ -193,7 +195,7 @@ async function executeFetch<TContext>(
 
     const dataReceivedFromService = await sendOperation(
       context,
-      operationForEntitiesFetch(fetch),
+      operationForEntitiesFetch({ fetch, variables }),
       { ...variables, representations },
     );
 
@@ -351,53 +353,120 @@ function downstreamServiceError(
   );
 }
 
-function mapFetchNodeToVariableDefinitions(
-  node: FetchNode,
-): VariableDefinitionNode[] {
+function mapFetchNodeToVariableDefinitions({
+  node,
+  variables,
+}: {
+  node: FetchNode;
+  variables?: any;
+}): {
+  variableDefinitions: VariableDefinitionNode[];
+  undefinedVariablesWithDefault: string[];
+} {
   const variableUsage = node.variableUsages;
   if (!variableUsage) {
-    return [];
+    return { variableDefinitions: [], undefinedVariablesWithDefault: [] };
   }
 
-  const variableMap = variableUsage.reduce((map, { node, type }) => {
-    const key = `${node.name.value}_${type.toString()}`;
+  const { undefinedVariablesWithDefault, variableMap } = variableUsage.reduce(
+    (usage, { node, type, defaultValue }) => {
+      const nodeName = node.name.value;
+      const key = `${nodeName}_${type.toString()}`;
 
-    if (!map.has(key)) {
-      map.set(key, {
-        kind: Kind.VARIABLE_DEFINITION,
-        variable: node,
-        type: astFromType(type),
-      });
-    }
+      if (
+        variables &&
+        nodeName in variables &&
+        typeof variables[nodeName] === 'undefined' &&
+        Boolean(defaultValue)
+      ) {
+        usage.undefinedVariablesWithDefault.push(nodeName);
+        return usage;
+      }
 
-    return map;
-  }, new Map<string, VariableDefinitionNode>());
+      if (!usage.variableMap.has(key)) {
+        usage.variableMap.set(key, {
+          kind: Kind.VARIABLE_DEFINITION,
+          variable: node,
+          type: astFromType(type),
+        });
+      }
 
-  return Array.from(variableMap.values());
+      return usage;
+    },
+    {
+      variableMap: new Map(),
+      undefinedVariablesWithDefault: [],
+    } as {
+      variableMap: Map<string, VariableDefinitionNode>;
+      undefinedVariablesWithDefault: string[];
+    },
+  );
+
+  return {
+    variableDefinitions: Array.from(variableMap.values()),
+    undefinedVariablesWithDefault,
+  };
 }
 
 function operationForRootFetch(
   fetch: FetchNode,
   operation: OperationTypeNode = 'query',
 ): OperationDefinitionNode {
+  const { variableDefinitions } = mapFetchNodeToVariableDefinitions({
+    node: fetch,
+  });
   return {
     kind: Kind.OPERATION_DEFINITION,
     operation,
     selectionSet: fetch.selectionSet,
-    variableDefinitions: mapFetchNodeToVariableDefinitions(fetch),
+    variableDefinitions,
   };
 }
 
-function operationForEntitiesFetch(fetch: FetchNode): OperationDefinitionNode {
+export function isVariableNode(node: any): node is VariableNode {
+  return node.kind === Kind.VARIABLE;
+}
+
+function operationForEntitiesFetch({
+  fetch,
+  variables,
+}: {
+  fetch: FetchNode;
+  variables: any;
+}): OperationDefinitionNode {
   const representationsVariable = {
     kind: Kind.VARIABLE,
     name: { kind: Kind.NAME, value: 'representations' },
   };
 
+  const {
+    variableDefinitions,
+    undefinedVariablesWithDefault,
+  } = mapFetchNodeToVariableDefinitions({
+    node: fetch,
+    variables,
+  });
+
+  //
+  let selectionSet = fetch.selectionSet;
+  if (undefinedVariablesWithDefault.length > 0) {
+    selectionSet = visit(fetch.selectionSet, {
+      Argument(node) {
+        if (
+          isVariableNode(node.value) &&
+          undefinedVariablesWithDefault.includes(node.value.name.value)
+        ) {
+          return null;
+        }
+        return;
+      },
+    });
+  }
+
   return {
     kind: Kind.OPERATION_DEFINITION,
     operation: 'query',
-    variableDefinitions: ([
+    variableDefinitions: [
       {
         kind: Kind.VARIABLE_DEFINITION,
         variable: representationsVariable,
@@ -415,9 +484,8 @@ function operationForEntitiesFetch(fetch: FetchNode): OperationDefinitionNode {
           },
         },
       },
-    ] as VariableDefinitionNode[]).concat(
-      mapFetchNodeToVariableDefinitions(fetch),
-    ),
+      ...variableDefinitions,
+    ] as VariableDefinitionNode[],
     selectionSet: {
       kind: Kind.SELECTION_SET,
       selections: [
@@ -434,7 +502,7 @@ function operationForEntitiesFetch(fetch: FetchNode): OperationDefinitionNode {
               value: representationsVariable,
             },
           ],
-          selectionSet: fetch.selectionSet,
+          selectionSet,
         },
       ],
     },
