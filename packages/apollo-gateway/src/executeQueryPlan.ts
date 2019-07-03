@@ -16,7 +16,6 @@ import {
   VariableDefinitionNode,
   GraphQLFieldResolver,
   visit,
-  VariableNode,
 } from 'graphql';
 import { GraphQLDataSource } from './datasources/types';
 import {
@@ -28,6 +27,7 @@ import {
 } from './QueryPlan';
 import { deepMerge } from './utilities/deepMerge';
 import { astFromType, getResponseName } from './utilities/graphql';
+import { isVariableNode } from './utilities/predicates';
 
 export type ServiceMap = {
   [serviceName: string]: GraphQLDataSource;
@@ -421,10 +421,6 @@ function operationForRootFetch(
     selectionSet: fetch.selectionSet,
     variableDefinitions,
   };
-}
-
-export function isVariableNode(node: any): node is VariableNode {
-  return node.kind === Kind.VARIABLE;
 }
 
 function operationForEntitiesFetch({
